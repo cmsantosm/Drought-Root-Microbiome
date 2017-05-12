@@ -1,0 +1,59 @@
+---
+Main effects
+---
+
+This script tests the main effect of each experimental variable on the relative abundances of individual phyla
+
+Load libraries
+```{r}
+library(DESeq2)
+library(biobroom)
+library(dplyr)
+library(tidyr)
+```
+
+Load data, subset, and reformat
+```{r}
+phycla <- readRDS("../Data/phycla_all.RDS")
+map <- readRDS("../Data/map.RDS")
+
+# Subset and format
+# We need to discard the bulk soils because they don't have any cultivar assigned
+
+map <- map %>% 
+  filter(Compartment != "BS") 
+
+row.names(map) <- map$SampleID
+
+phycla <- phycla[,match(map$SampleID, colnames(phycla))]
+```
+
+Run DESeq
+```{r}
+# Generate DESeq object
+dds <- DESeqDataSetFromMatrix(countData = phycla,
+                              colData = map,
+                              design = ~ Soil + Compartment + Treatment + Cultivar + Library)
+  
+dds <- DESeq(dds)
+
+main.effects = c("Soil", "Compartment", "Treatment", "Cultivar")
+
+main.effects.list <- list(Compartment = formula(~Soil + Treatment + Cultivar + Library),
+                          Soil = formula(~Compartment + Treatment + Cultivar + Library),
+                          Treatment = formula(~Soil + Compartment + Cultivar + Library),
+                          Cultivar = formula(~Soil + Compartment + Treatment + Library))
+
+main.dds.list <- vector("list")
+  
+for(i in main.effects) {
+  main.dds.list[[i]] <- nbinomLRT(dds,reduced = main.effects.list[[i]]) %>% 
+    results(pAdjustMethod = "bonferroni") %>% 
+    tidy()
+}
+  
+main.df <- plyr::ldply(main.dds.list, function(x) x)
+names(main.df)[1:2] <- c("Effect", "OTU_ID")
+  
+saveRDS(main.df, "../Tables/main_eff_phy.RDS")
+```

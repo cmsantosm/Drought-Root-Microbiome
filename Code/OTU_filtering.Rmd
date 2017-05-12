@@ -1,0 +1,160 @@
+---
+OTU filtering
+---
+
+This script generates the filtered OTU table that is used for the downstream analyses
+
+```{r}
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+```
+
+Load the OTU table (open reference with greengenes 13.8), the mapping file, and the taxonomy file
+
+```{r}
+otu <- readRDS("../Data/otu_table.RDS")
+map <- readRDS("../Data/map.RDS")
+tax <- readRDS("../Data/tax.RDS")
+```
+
+Identify the OTUs that were clustered de novo, and those identified as chloroplast or mitochondria
+
+```{r}
+otu.tidy <- data.frame(otu) %>% mutate(OTU_ID = row.names(otu)) %>%
+  gather(key = "SampleID", value = "Counts", -OTU_ID)
+
+otu.tidy %>%
+  inner_join(tax, by = "OTU_ID") %>%
+  group_by(SampleID, Clustering) %>%
+  summarise(Total = sum(Counts)) %>%
+  inner_join(map, by = "SampleID") %>%
+  ggplot(aes(paste(Cultivar, Tub), Total, fill = Clustering)) +
+  geom_bar(stat = "identity", position = "fill") +
+  facet_grid(Soil ~ Compartment + Treatment, scales = "free", space = "free") +
+  scale_fill_brewer(palette = "Accent") +
+  theme(axis.text.x = element_text(angle = 90, size = 4))
+
+otu.tidy %>%
+  inner_join(tax, by = "OTU_ID") %>%
+  group_by(SampleID, Assignment) %>%
+  summarise(Total = sum(Counts)) %>%
+  inner_join(map, by = "SampleID") %>%
+  ggplot(aes(paste(Cultivar, Tub), Total, fill = Assignment)) +
+  geom_bar(stat = "identity", position = "fill") +
+  facet_grid(Soil ~ Compartment + Treatment, scales = "free", space = "free") +
+  scale_fill_brewer(palette = "Set2") +
+  theme(axis.text.x = element_text(angle = 90, size = 4))
+  
+```
+
+Filter out OTUs identified as chloroplast and mitochondria
+
+```{r}
+tax.micro <- filter(tax, Assignment != "Mitochondria" & Assignment != "Chloroplast")
+otu.micro <- otu[row.names(otu) %in% tax.micro$OTU_ID,]
+```
+
+Filter out non-persistent OTUs
+```{r}
+
+otu.micro <- otu.micro[ , match(map$SampleID, colnames(otu.micro))]
+
+data.frame(OTU_ID = row.names(otu.micro)) %>% 
+  mutate(Persistence = rowSums(otu.micro > 0)) %>%
+  mutate(TotalCounts = rowSums(otu.micro)) %>%
+  inner_join(tax, by = "OTU_ID") %>%
+  ggplot(aes(TotalCounts, Persistence)) +
+  geom_point(aes(color = Clustering),alpha = 0.4) +
+  scale_color_brewer(palette = "Accent") +
+  geom_hline(yintercept = 0.05 * ncol(otu.micro), color = "red", linetype = 2) +
+  scale_x_log10() +
+  facet_wrap(~Phylum)
+
+data.frame(OTU_ID = row.names(otu.micro)) %>% 
+  mutate(Persistence = rowSums(otu.micro > 0)) %>%
+  mutate(TotalCounts = rowSums(otu.micro)) %>%
+  inner_join(tax, by = "OTU_ID") %>%
+  ggplot(aes(TotalCounts, Persistence)) +
+  geom_point(aes(color = Clustering),alpha = 0.4) +
+  scale_color_brewer(palette = "Accent") +
+  geom_hline(yintercept = 0.05 * ncol(otu.micro), color = "red", linetype = 2) +
+  scale_x_log10()
+
+```
+
+```{r}
+otu.filt <- otu.micro[rowSums(otu.micro > 0) > 0.05 * ncol(otu.micro),]
+
+map %>%
+  mutate(SeqDepth = colSums(otu.filt)) %>%
+  ggplot(aes(SeqDepth, fill = Compartment)) +
+  geom_histogram() +
+  scale_fill_manual(values = c("#E41A1C", "#984EA3", "#4DAF4A", "#377EB8")) 
+
+map %>%
+  mutate(SeqDepth = colSums(otu.filt)) %>%
+  ggplot(aes(SeqDepth, fill = Soil)) +
+  geom_histogram() +
+  scale_fill_manual(values = c("#E78AC3", "#A6D854", "#FFD92F"))
+
+map %>%
+  mutate(SeqDepth = colSums(otu.filt)) %>%
+  ggplot(aes(SeqDepth, fill = Cultivar)) +
+  geom_histogram() +
+  scale_fill_manual(values = c("#A6CEE3", "#1F78B4","#FDBF6F", "#FF7F00"))
+
+map %>%
+  mutate(SeqDepth = colSums(otu.filt)) %>%
+  ggplot(aes(SeqDepth, fill = Library)) +
+  geom_histogram()
+```
+
+
+```{r}
+sets <- list(raw.data = otu,
+          no_plant = otu.micro,
+          filtered = otu.filt)
+
+stats <- data.frame(nOTUs = sapply(sets, function(x) nrow(x)),
+                    mean_SeqDepth = sapply(sets, function(x) mean(colSums(x))),
+                    sd_SeqDepth = sapply(sets, function(x) sd(colSums(x))),
+                    TotReads = sapply(sets, function(x) sum(x)),
+                    PercenOrig = sapply(sets, function(x) sum(x)/sum(otu)))
+
+stats
+```
+
+For the downstream analyses, we will be using the filtered data set. We will perform certain tests at different taxonomic levels, so we need to collapse the data for each rank. First, since Proteobacteria highly diverse, we will create a new variable PhyClass that contains the specific Class of each OTU if it belongs to this phylum, otherwise, it will display the Phylum. Also, let's see the distribution of unidentified taxa across ranks.
+
+```{r}
+#PhyClass
+phycla.tidy <- data.frame(otu.filt) %>%
+  mutate(OTU_ID = row.names(otu.filt)) %>%
+  gather(key = "SampleID", value = "Counts", -OTU_ID) %>%
+  inner_join(select(tax, OTU_ID, PhyClass)) %>%
+  #filter(Phylum != "unassigned" & Phylum != "unclassified" & Phylum != " unassigned" & Phylum != "unidentified") %>%
+  group_by(SampleID, PhyClass) %>%
+  summarise(Total = sum(Counts))
+
+phycla.df <- phycla.tidy %>%
+  spread(key = SampleID, value = Total) %>%
+  as.data.frame()
+
+row.names(phycla.df) <- phycla.df$PhyClass
+phycla.df <- phycla.df[,-1]
+
+#OTU
+otu.filt.tidy <- data.frame(otu.filt) %>% mutate(OTU_ID = row.names(otu.filt)) %>%
+  gather(key = "SampleID", value = "Counts", -OTU_ID)
+
+```
+
+
+```{r}
+saveRDS(otu.filt, "../Data/otu_filt.RDS")
+saveRDS(otu.filt.tidy, "../Data/otu_filt_tidy.RDS")
+saveRDS(phycla.df, "../Data/phycla_all.RDS")
+saveRDS(phycla.tidy, "../Data/phycla_all_tidy.RDS")
+```
+

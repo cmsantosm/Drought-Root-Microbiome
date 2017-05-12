@@ -1,0 +1,186 @@
+---
+Cultivar x Treatment interaction
+---
+
+This code performs the cultivar x treatment analysis
+This code requires files generated from the following scripts:
+OTU_filtering.Rmd
+vsd_normalization.Rmd
+
+Load the libraries
+```{r}
+library(DESeq2)
+library(biobroom)
+library(dplyr)
+library(tidyr)
+```
+
+Load the data. Because of the high variability between compartments and soils, we evaluated the cultivar x treatment interactions within subsets covering each compartment-soil combination
+```{r}
+full.otu <- readRDS("../Data/otu_filt.RDS")
+full.map <- readRDS("../Data/map.RDS")
+full.map <- mutate(full.map, Group = paste(Cultivar, Treatment, sep = "."))
+
+RS.A.map <- full.map %>% filter(Compartment == "RS" & Soil == "A") 
+ES.A.map <- full.map %>% filter(Compartment == "ES" & Soil == "A")
+RS.B.map <- full.map %>% filter(Compartment == "RS" & Soil == "B") 
+ES.B.map <- full.map %>% filter(Compartment == "ES" & Soil == "B")
+RS.D.map <- full.map %>% filter(Compartment == "RS" & Soil == "D") 
+ES.D.map <- full.map %>% filter(Compartment == "ES" & Soil == "D")
+
+sets <- c("RS.A", "ES.A","RS.B", "ES.B", "RS.D", "ES.D")
+
+sets.list <- list(RS.A = RS.A.map,
+                  ES.A = ES.A.map,
+                  RS.B = RS.B.map,
+                  ES.B = ES.B.map,
+                  RS.D = RS.D.map,
+                  ES.D = ES.D.map) 
+
+eff.list <- vector("list")
+fc.list <- vector("list")
+```
+
+Detect all the interactions using an lrt approach
+```{r}
+for(s in sets){
+  map <- sets.list[[s]]
+  row.names(map) <- map$SampleID
+  
+  otu <- full.otu[,match(map$SampleID, colnames(full.otu))]
+  otu <- otu[rowSums(otu) > 0,]
+
+  # Generate DESeq object
+  dds <- DESeqDataSetFromMatrix(countData = otu,
+                                colData = map,
+                                design = ~ Treatment + Cultivar + Treatment:Cultivar + Library)
+  
+  dds <- DESeq(dds, test = "LRT", reduced = ~ Treatment + Cultivar + Library)
+  
+  eff.list[[s]] <- results(dds) %>% tidy()
+}
+```
+
+Format the results
+```{r}
+eff.df <- plyr::ldply(eff.list, function(x) x)
+names(eff.df)[1:2] <- c("Set", "OTU_ID") 
+eff.df <- eff.df %>%
+  separate(Set, c("Compartment", "Soil"), sep = "\\.") 
+```
+
+Calculate the drought effect within compartmnet to obtain the logFC
+```{r}
+for(s in sets){
+  map <- sets.list[[s]]
+  row.names(map) <- map$SampleID
+  
+  otu <- full.otu[,match(map$SampleID, colnames(full.otu))]
+  otu <- otu[rowSums(otu) > 0,]
+
+  # Generate DESeq object
+  dds <- DESeqDataSetFromMatrix(countData = otu,
+                                colData = map,
+                                design = ~ Group + Library)
+  
+  dds <- DESeq(dds)
+  
+  contrasts = c("G1", "G2", "S1", "S2") 
+  
+  contrast.list <- list(G1 = c("Group", "G1.DS", "G1.WC"),
+                        G2 = c("Group", "G2.DS", "G2.WC"),
+                        S1 = c("Group", "S1.DS", "S1.WC"),
+                        S2 = c("Group", "S2.DS", "S2.WC"))
+  
+  # We are using the Bonferroni correction for dealing with multiple comparisons
+  
+  for(i in contrasts) {
+    fc.list[[paste(s,i,sep = ".")]] <- tidy(results(dds, contrast = contrast.list[[i]]))
+  }
+}
+```
+
+Format the results
+```{r}
+fc.df <- plyr::ldply(fc.list, function(x) x)
+names(fc.df)[1:2] <- c("Contrast", "OTU_ID") 
+fc.df <- fc.df %>%
+  separate(Contrast, c("Compartment", "Soil", "Cultivar"), sep = "\\.") 
+```
+
+Identify how many interactions were detected
+```{r}
+eff.df %>%
+  filter(p.adjusted < 0.05) %>%
+  group_by(Soil, Compartment) %>%
+  count()
+```
+
+Generate the plots
+```{r}
+library(ggplot2)
+library(scales)
+library(RColorBrewer)
+
+clt.lrt.sig <- eff.df %>% filter(p.adjusted < 0.05)
+clt.fc.sig <- fc.df %>%
+  inner_join(select(clt.lrt.sig, Soil, Compartment, OTU_ID), by = c("Soil", "Compartment", "OTU_ID"))
+
+otu.vsd <- readRDS("../Data/otu_vsd_blind.RDS")
+otu.vsd[otu.vsd < 0] <- 0
+otu.vsd.tidy <- data.frame(otu.vsd) %>%
+  mutate(OTU_ID = row.names(otu.vsd)) %>%
+  gather(key = "SampleID", value = "RelAb", -OTU_ID)
+otu.vsd.tidy <- inner_join(otu.vsd.tidy, full.map, by = "SampleID")
+
+otu.vsd.tidy$Treatment = factor(otu.vsd.tidy$Treatment,
+                               levels = c("DS", "WC"),
+                               labels = c("Drought", "Control"))
+
+maxval  <- ceiling(max(abs(clt.fc.sig$estimate)))
+values  <- seq(-maxval,maxval,length = 8)
+
+otu.d <- otu.vsd.tidy %>% 
+  inner_join(clt.fc.sig, by = c("Compartment", "Soil", "Cultivar", "OTU_ID")) %>% 
+  filter(Soil == "D") %>%
+  ggplot(aes(Cultivar, RelAb, fill = Treatment)) +
+  geom_boxplot() +
+  geom_point(aes(Cultivar, -0.5, color = estimate, alpha = p.adjusted < 0.05), size = 5) +
+  facet_wrap(~OTU_ID, scales = "free_y", ncol = 6) +
+  scale_color_gradientn(name = "Drought\nresponse\n(logFC)",
+                        colors = brewer.pal(11,"BrBG")[11:1],
+                        limits = c(-maxval,maxval),
+                        values = values,
+                        rescaler = function(x, ...) x, oob = identity) +
+  scale_alpha_discrete(range = c(0, 1), guide = FALSE) +
+  ggtitle("Davis Rhizosphere") +
+  ylab("Normalized Counts") +
+  #scale_y_log10() +
+  theme_light() +
+  scale_fill_manual(values = c("#D8B365" , "#5AB4AC")) +
+  theme(text = element_text(size = 15))
+
+otu.b <- otu.vsd.tidy %>% 
+  inner_join(clt.fc.sig, by = c("Compartment", "Soil", "Cultivar", "OTU_ID")) %>% 
+  filter(Soil == "B") %>%
+  ggplot(aes(Cultivar, RelAb, fill = Treatment)) +
+  geom_boxplot() +
+  geom_point(aes(Cultivar, -0.5, color = estimate, alpha = p.adjusted < 0.05), size = 5) +
+  facet_wrap(~OTU_ID, scales = "free_y", ncol = 6) +
+  scale_color_gradientn(name = "Drought\nresponse\n(logFC)",
+                        colors = brewer.pal(11,"BrBG")[11:1],
+                        limits = c(-maxval,maxval),
+                        values = values,
+                        rescaler = function(x, ...) x, oob = identity) +
+  scale_alpha_discrete(range = c(0, 1), guide = FALSE) +
+  ggtitle("Biggs Rhizosphere") +
+  ylab("Normalized Counts") +
+  #scale_y_log10() +
+  theme_light() +
+  scale_fill_manual(values = c("#D8B365" , "#5AB4AC")) +
+  theme(text = element_text(size = 15))
+  
+otu.d; otu.b
+
+```
+

@@ -1,0 +1,265 @@
+---
+Phylum-level analysis
+---
+This script requires the files generated in the following scripts
+OTU_filtering.Rmd
+drght_contrasts.Rmd
+main_effects_phylum.Rmd
+
+
+Load libraries
+```{r}
+library(dplyr)
+library(ggplot2)
+library(tidyr)
+library(RColorBrewer)
+library(scales)
+```
+
+Load data
+```{r}
+phycla <- readRDS("../Data/phycla_all.RDS")
+tax <- readRDS("../Data/tax.RDS")
+map <- readRDS("../Data/map.RDS")
+```
+
+Relevel and relabel some of the factors in the mapping file
+```{r}
+###Since soil only has 4 samples per treatment, we need to have a special label for plotting. This generates dummy variables that will be used in the facets
+
+map$Treatment2 <- factor(map$Treatment,
+                         levels = c("WC", "DS"),
+                         labels = c("C", "D"))
+map$Treatment <- factor(map$Treatment,
+                        levels = c("WC", "DS"),
+                        labels = c("Control", "Drought"))
+
+map$Treatment2 <- ifelse(map$Compartment == "BS", as.character(map$Treatment2), as.character(map$Treatment))
+
+map$Compartment <- factor(map$Compartment,
+                          levels = c("BS","RS","ES"),
+                          labels = c("BS", "Rhizosphere", "Endosphere"))
+map$Soil <- factor(map$Soil,
+                   levels = c("A", "B", "D"),
+                   labels = c("Arbuckle", "Biggs", "Davis"))
+
+```
+
+
+This code generates the phylum profiles
+```{r}
+# Get the relative abundances and reformat
+phy.ra <- t(t(phycla)/colSums(phycla))
+
+phy.ra.tidy <- data.frame(phy.ra) %>%
+  mutate(Phylum = row.names(phy.ra)) %>%
+  gather(key = "SampleID", value = "RelAb", -Phylum)
+
+# Get the top taxa in the whole dataset
+phy.ord <- data.frame(Phylum = row.names(phy.ra), Total = rowSums(phy.ra)/sum(phy.ra)) %>%
+  arrange(desc(Total)) %>%
+  mutate(CumSum = cumsum(Total))
+
+phy.top <- c(as.character(head(phy.ord, n = 12)$Phylum))
+  
+# Generate the df that will be used for plotting
+prof.plot <- phy.ra.tidy %>%
+  filter(Phylum %in% phy.ord$Phylum[1:12]) %>%
+  inner_join(map, by = "SampleID")
+  
+# Reorganize the taxa so that all Proteobacteria are at the end, and generate new labels to use greek letters
+prof.plot$Phylum <- factor(prof.plot$Phylum,
+                           levels = c("Acidobacteria",
+                "Actinobacteria",
+                "Bacteroidetes",
+                "Chloroflexi",
+                "Firmicutes",
+                "Gemmatimonadetes",
+                "Planctomycetes",
+                "Verrucomicrobia",
+                "Proteobacteria.Alphaproteobacteria",
+                "Proteobacteria.Betaproteobacteria",
+                "Proteobacteria.Deltaproteobacteria",
+                "Proteobacteria.Gammaproteobacteria"))
+
+my.labs <- list("Acidobacteria",
+                "Actinobacteria",
+                "Bacteroidetes",
+                "Chloroflexi",
+                "Firmicutes",
+                "Gemmatimonadetes",
+                "Planctomycetes",
+                "Verrucomicrobia",
+                expression(paste(alpha, " - Proteobacteria")),
+                expression(paste(beta, " - Proteobacteria")),
+                expression(paste(delta, " - Proteobacteria")),
+                expression(paste(gamma, " - Proteobacteria")))
+
+# Plot
+phyloplot <- ggplot() +
+  geom_bar(data = prof.plot, aes(paste(Cultivar, Tub), RelAb, fill = Phylum), stat = "identity", position = "stack") +
+  facet_grid(Soil ~ Compartment + Treatment2, scales = "free", space = "free") +
+  scale_fill_manual(name = "Phylum",
+                    values = c(brewer.pal(8, "Set2")[1:8], brewer.pal(11, "RdYlBu")[7:10]),
+                    labels = my.labs) +
+  geom_point(data = filter(prof.plot, Soil == "Davis" & Compartment != "BS"), 
+             aes(paste(Cultivar, Tub), -0.08, color = Cultivar), 
+             size = 5, shape = 15) +
+  scale_color_manual(values = c(brewer.pal(12, "Paired")[7:10]),
+                     guide = FALSE) +
+  labs(y = "Relative Abundance") +
+  theme_light() +
+  theme(text = element_text(size = 17),
+        legend.position = "right",
+        legend.text = element_text(size = 16),
+        axis.text.x = element_blank(),
+        axis.title.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        panel.background = element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank()) +
+  guides(fill = guide_legend(ncol = 1))
+
+phyloplot
+  
+```
+
+This takes a look at the main effects on the relative abundances of phyla
+```{r}
+
+effects <- readRDS("../Tables/main_eff_phy.RDS")
+
+# Get the stats  
+main.eff.stats <- effects %>% 
+  filter(OTU_ID != "unassigned" & OTU_ID != "unclassified" & OTU_ID != "Proteobacteria.unclassified") %>%
+  filter(p.adjusted < 0.05) %>% 
+  inner_join(phy.ord, by = c("OTU_ID" = "Phylum")) %>%
+  group_by(Effect) %>% 
+  summarise(n = sum(estimate != 0),
+            CumRelAb = sum(Total))
+
+# Generate the data frame that will be used for plotting
+plot.effect <-effects %>%
+  filter(p.adjusted < 0.05) %>%
+  filter(OTU_ID != "unassigned" & OTU_ID != "unclassified" & OTU_ID != "Proteobacteria.unclassified") %>%
+  select(OTU_ID) %>%
+  inner_join(effects, by = "OTU_ID") %>%
+  inner_join(phy.ord, by = c("OTU_ID" = "Phylum"))
+
+plot.effect$OTU_ID <- gsub(x = plot.effect$OTU_ID, pattern = "Proteobacteria.", replacement = "") 
+
+# Plot the log p.adjusted value of the significant taxa per main effect
+main.eff.logp <- plot.effect %>%
+  ggplot(aes(reorder(OTU_ID, -Total), Effect, fill = -log10(p.adjusted))) +
+  geom_tile(aes(alpha = p.adjusted < 0.05), color = "gray", size = 1) +
+  scale_fill_gradientn(name = "-log10(P)",
+                       colors = RColorBrewer::brewer.pal(9,"BuPu"), trans = "sqrt") +
+  scale_alpha_discrete(range = c(0, 1), guide = FALSE) +
+  geom_point(data = filter(plot.effect, Effect == "Compartment"), 
+             aes(reorder(OTU_ID, -Total), -0.2, color = Total),
+             size = 8, shape = 15) +
+  scale_color_gradientn(name = "Relative Abundance",
+                       colors = RColorBrewer::brewer.pal(9,"Greys")[3:9],
+                       trans = "sqrt") +
+  theme_light()+
+  theme(text = element_text(size = 15),
+        axis.text.x = element_text(angle = 45, hjust = 1),
+        axis.title = element_text(size = 0),
+        axis.line.x = element_line(colour = "black"),
+        axis.line.y = element_line(colour = "black"),
+        panel.spacing = unit(0.5, "lines"),
+        panel.background = element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.border = element_blank(),
+        legend.position = "bottom") +
+  guides(fill = guide_colorbar(title.position = "top", 
+                               title.hjust = 0.5,
+                               barwidth = 20,
+                               barheight = 1,
+                               reverse = TRUE),
+         color = guide_colorbar(title.position = "top", 
+                               title.hjust = 0.5,
+                               barwidth = 20,
+                               barheight = 1,
+                               reverse = TRUE))
+
+# Plot the cumulative relative abundance of the significant taxa per main effect
+main.eff.cra <- effects %>% 
+  filter(OTU_ID != "unassigned" & OTU_ID != "unclassified" & OTU_ID != "Proteobacteria.unclassified") %>%
+  filter(p.adjusted < 0.05) %>% 
+  inner_join(phy.ord, by = c("OTU_ID" = "Phylum")) %>%
+  group_by(Effect) %>% 
+  summarise(C.R.A. = sum(Total)) %>%
+  ggplot(aes(Effect, C.R.A.)) +
+  geom_bar(stat = "identity") +
+  coord_flip() +
+  theme_light()+
+  theme(text = element_text(size = 15),
+        axis.line.x = element_line(colour = "black"),
+        axis.line.y = element_line(colour = "black"))
+  
+
+main.eff.stats; main.eff.logp ; main.eff.cra
+```
+
+Generate the logFC plot for drought responsive taxa in each soil and compartment
+```{r}
+
+paired.wt <- readRDS("../Tables/dab_drought.RDS")
+paired.wt <- filter(paired.wt, Compartment != "WC")
+
+all.wt <- paired.wt %>%
+  filter(Rank == "PhyClass") %>%
+  filter(p.adjusted < 0.05) %>%
+  filter(OTU_ID != "unassigned" & OTU_ID != "unclassified" & OTU_ID != "Proteobacteria.unclassified") %>%
+  select(OTU_ID) %>%
+  inner_join(paired.wt, by = "OTU_ID") %>%
+  filter(Rank == "PhyClass") %>%
+  inner_join(phy.ord, by = c("OTU_ID" = "Phylum"))
+
+all.wt$Compartment <- factor(all.wt$Compartment,
+                        levels = c("BS","RS", "ES"),
+                        labels = c("Bulk Soil", "Rhizosphere", "Endosphere"))
+
+all.wt$Soil <- factor(all.wt$Soil,
+                      levels = c("A", "B", "D"),
+                      labels = c("Arbuckle", "Biggs", "Davis"))
+
+all.wt$OTU_ID <- gsub(x = all.wt$OTU_ID, pattern = "Proteobacteria.", replacement = "") 
+
+
+maxval  <- ceiling(max(abs(all.wt$estimate)))
+values  <- seq(-maxval,maxval,length = 8)
+
+all.wt$OTU_ID <- factor(all.wt$OTU_ID)
+
+fc.plot <- all.wt %>%
+  ggplot(aes(reorder(OTU_ID, - Total), Soil, fill = estimate)) +
+  geom_tile(aes(alpha = p.adjusted < 0.05), color = "gray", size = 1) +
+  scale_fill_gradientn(name = "logFC",
+                        colors = brewer.pal(11,"BrBG")[11:1],
+                        limits = c(-maxval,maxval),
+                        values = values,
+                        rescaler = function(x, ...) x, oob = identity) +
+  scale_alpha_discrete(range = c(0, 1), guide = FALSE) +
+  facet_grid(Compartment ~ ., scales = "free", space = "free") +
+  theme_light()+
+  theme(text = element_text(size = 15),
+        axis.text.x = element_text(angle = 45, hjust = 1),
+        axis.title = element_text(size = 0),
+        axis.line.x = element_line(colour = "black"),
+        axis.line.y = element_line(colour = "black"),
+        panel.spacing = unit(0.5, "lines"),
+        panel.background = element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.border = element_blank(),
+        legend.position = "right") +
+  guides(fill = guide_colorbar(title.position = "top", 
+                               title.hjust = 0.5,
+                               barwidth = 1.5,
+                               barheight = 7))
+
+fc.plot
+```

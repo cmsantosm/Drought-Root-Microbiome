@@ -1,0 +1,153 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+This script performs the compartment x treatment interaction analysis
+This script requires the files generate in the following scripts:
+drght_contrasts.Rmd
+
+```{r}
+library(dplyr)
+library(ggplot2)
+library(tidyr)
+library(RColorBrewer)
+```
+
+Load data and separate the contrasts 
+```{r}
+dab <- readRDS("../Tables/dab_drought.RDS")
+
+dab.trt <- filter(dab, Compartment != "WC") # Drought response
+dab.cmp <- filter(dab, Compartment == "WC") # Diff ab between rhizocompartments under watered conditions
+```
+
+Generate the MA plot showing the OTUs that significantly enriched in each compartment
+```{r}
+ma.plot.df <- dab.cmp %>%
+  filter(Rank == "OTU") %>%
+  rename(Contrast = Compartment) %>%
+  filter(!is.na(p.adjusted)) %>%
+  mutate(Enrichment = ifelse(p.adjusted >= 0.05, "Non-Significant", ifelse(estimate > 0, "Endosphere-Enriched", "Rhizosphere-Enriched"))) %>%
+  mutate(DiffAb = ifelse(p.adjusted < 0.05, "Significant", "Non-Significant"))
+
+ma.plot.df$Soil <- factor(ma.plot.df$Soil, 
+                       labels = c("Arbuckle", "Biggs", "Davis"))
+ma.plot.df$Enrichment <- factor(ma.plot.df$Enrichment,
+                             levels = c("Endosphere-Enriched", "Rhizosphere-Enriched", "Non-Significant"))
+  
+ma.plot <- ggplot() +
+  geom_point(data = filter(ma.plot.df, Enrichment == "Non-Significant"), aes(baseMean, estimate, color = Enrichment, shape = DiffAb), alpha = 0.2, size = 3) +
+  geom_point(data = filter(ma.plot.df, Enrichment != "Non-Significant"), aes(baseMean, estimate, color = Enrichment, shape = DiffAb), alpha = 0.4, size = 3) +
+  facet_grid(Soil~Rank) +
+  scale_color_manual(name = "Compartment Enrichment",
+                     values = c("#E78AC3", "#969696", "#FFD92F")) +
+  scale_shape_manual(name = "Differential abundance\nbetween compartments",
+                     values = c(1,16)) +
+  scale_x_log10() +
+  xlab("log Mean OTU Abundance") +
+  ylab("logFC") +
+  theme_light() +
+  theme(text = element_text(size = 15),
+        legend.position = "bottom",
+        strip.text = element_text(size = 15)) +
+  guides(color = guide_legend(title.position = "top", 
+                              ncol = 1),
+         shape = guide_legend(title.position = "top", 
+                              ncol = 1))
+
+ma.plot
+```
+
+Generate the plot assessing the relationship between drought response and compartment enrichment
+```{r}
+#Identify the OTUs that were uniquely responding to drought in one compartment
+unique <- dab.trt %>% 
+  filter(Rank == "OTU") %>%
+  filter(p.adjusted < 0.05) %>%
+  filter(Compartment != "BS") %>%
+  group_by(Soil, OTU_ID) %>%
+  count() %>%
+  ungroup() %>%
+  inner_join(dab.trt, by = c("Soil", "OTU_ID")) %>%
+  filter(Rank == "OTU") %>%
+  filter(p.adjusted < 0.05) %>%
+  filter(Compartment != "BS") %>%
+  mutate(Response = ifelse(n == 2, "Both", Compartment))
+
+# Generate the data frame used for plotting
+dual.plot.df <- dab.wc %>%
+  filter(Rank == "OTU") %>%
+  inner_join(unique, by = c("OTU_ID", "Soil")) %>%
+  filter(Response != "Both") %>%
+  filter(Compartment.y != "BS") %>%
+  mutate(Enrichment = ifelse(estimate.y > 0, "Drought", "Water")) %>%
+  mutate(p.adjusted.x = ifelse(is.na(p.adjusted.x), 1, p.adjusted.x)) %>%
+  filter(p.adjusted.y < 0.05) %>%
+  mutate(DiffAb = ifelse(p.adjusted.x < 0.05, "Significant", "Non-significant"))
+
+dual.plot.df$Soil <- factor(dual.plot.df$Soil,
+                         labels = c("Arbuckle", "Biggs", "Davis"))
+
+dual.plot.df$Compartment.y <- factor(dual.plot.df$Compartment.y,
+                                  labels = c("Endosphere", "Rhizosphere"))
+
+# Plot
+dual.plot <- ggplot(dual.plot.df,aes(estimate.y, estimate.x, color = Compartment.y, shape = DiffAb)) +
+  geom_point(alpha = 0.6, size = 3) +
+  geom_hline(yintercept = 0, linetype = 2) +
+  geom_vline(xintercept = 0, linetype = 2) +
+  facet_grid(Soil~Rank.x, scales = "free", space = "free") +
+  scale_color_manual(name = "Drought-responsive\ncompartment",
+                     values = c("#80B1D3", "#FB8072")) +
+  scale_shape_manual(name = "Differential abundance\nbetween compartments",
+                     values = c(1,16)) +
+  labs(x = "Drought response",
+       y = "Compartment enrichment") +
+  theme_light() +
+  theme(text = element_text(size = 15),
+        legend.position = "bottom",
+        strip.text = element_text(size = 15)) +
+  guides(color = guide_legend(title.position = "top", 
+                              ncol = 1),
+         shape = guide_legend(title.position = "top", 
+                              ncol = 1))
+
+dual.plot
+```
+
+Generate the plot showing the ratios of differential abundance between compartments 
+```{r}
+ratio.plot.df <- dab.wc %>%
+  inner_join(select(unique, Soil, Compartment, OTU_ID, Response, estimate), by = c("Soil", "OTU_ID")) %>%
+  mutate(DroughtResp = ifelse(estimate.y > 0, "Drought\nEnriched", "Drought\nDepleted")) %>%
+  #mutate(p.adjusted = ifelse(is.na(p.adjusted), 1, p.adjusted)) %>%
+  mutate(CompartSig = ifelse(p.adjusted >= 0.05, "Non-Sig", "DiffAb")) %>%
+  mutate(CompartEnrich = ifelse(p.adjusted >= 0.05, "Non-Significant", ifelse(estimate.x > 0, "Endosphere-Enriched", "Rhizosphere-Enriched"))) %>%
+  filter(Response != "Both")
+
+ratio.plot.df$CompartEnrich <- factor(ratio.plot.df$CompartEnrich,
+                                   levels = c("Endosphere-Enriched",
+                                              "Rhizosphere-Enriched", 
+                                              "Non-Significant"))
+ratio.plot.df$Soil <- factor(ratio.plot.df$Soil,
+                          labels = c("Arbuckle", "Biggs", "Davis"))
+
+ratio.plot.df$Response <- factor(ratio.plot.df$Response,
+                              levels = c("Both", "RS", "ES"),
+                              labels = c("Both", "RS", "ES"))
+
+ratio.plot <- ggplot(ratio.plot.df, aes(Response, fill = CompartEnrich)) +
+  geom_bar(position = "fill") +
+  facet_grid(Soil ~ DroughtResp, scales = "free", space = "free") +
+  scale_fill_manual(name = "Compartment Enrichment",
+                    values = c("#E78AC3", "#FFD92F", "#969696")) +
+  theme_light() +
+  xlab("Drought-responsive compartment") +
+  ylab("% OTUs") +
+  theme(text = element_text(size = 15),
+        legend.position = "bottom",
+        strip.text = element_text(size = 15)) +
+  guides(fill = guide_legend(title.position = "top", 
+                              ncol = 1))
+ratio.plot
+```
